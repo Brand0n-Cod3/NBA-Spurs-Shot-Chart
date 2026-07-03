@@ -1,204 +1,200 @@
-import pandas as pd
+"""
+San Antonio Spurs — 2025-26 Shot Chart
+Two-panel dashboard: shot locations (left) + live zone-efficiency panel (right).
+
+Reads spurs_data.csv with columns:
+  PLAYER_NAME, LOC_X, LOC_Y, SHOT_DISTANCE, SHOT_TYPE, ACTION_TYPE, SHOT_MADE_FLAG
+Outputs spurs_shot_chart.html (self-contained, deployable to GitHub Pages).
+"""
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 chart = pd.read_csv("spurs_data.csv")
 
-# ── Spurs palette ──────────────────────────────────────────────
-BG         = "#0d0d0d"       # near-black background
-COURT_BG   = "#1a1a1a"       # dark court surface
-COURT_LINE = "#888888"       # silver court lines
-HOOP_COL   = "#C4A35A"       # Spurs gold
-MAKE_COL   = "#A8D8A8"       # soft green makes
-MISS_COL   = "#E07070"       # soft red misses
-TEXT_COL   = "#E8E8E8"       # off-white text
-ACC_COL    = "#C0C0C0"       # silver accent
+# ── Spurs palette (silver / black, gold accent) ────────────────
+BG        = "#0b0b0c"   # paper
+COURT_BG  = "#141416"   # court surface
+LINE      = "#4a4a4f"   # court lines (muted so shots pop)
+GOLD      = "#C4A35A"   # Spurs gold accent
+MAKE      = "#7FCF9F"   # makes
+MISS      = "#E06C6C"   # misses
+TEXT      = "#ECECEC"
+MUTE      = "#8a8a90"
+PANEL     = "#161618"
 
-player_names = [
+FONT = "'Arial Narrow', 'Helvetica Neue', Arial, sans-serif"
+
+players = [
     "De'Aaron Fox", "Stephon Castle", "Julian Champagnie",
-    "Devin Vassell", "Victor Wembanyama", "Keldon Johnson", "Dylan Harper"
+    "Devin Vassell", "Victor Wembanyama", "Keldon Johnson", "Dylan Harper",
 ]
 
-# ── Per-player stats ───────────────────────────────────────────
-def player_stats(df, player):
-    p = df[df['PLAYER_NAME'] == player]
-    total   = len(p)
-    made    = p['SHOT_MADE_FLAG'].sum()
-    fg_pct  = round(made / total * 100, 1) if total > 0 else 0
-    threes  = p[p['SHOT_TYPE'] == '3PT Field Goal']
-    twos    = p[p['SHOT_TYPE'] == '2PT Field Goal']
-    t3_pct  = round(threes['SHOT_MADE_FLAG'].sum() / len(threes) * 100, 1) if len(threes) > 0 else 0
-    t2_pct  = round(twos['SHOT_MADE_FLAG'].sum()   / len(twos)   * 100, 1) if len(twos)   > 0 else 0
-    return dict(total=total, made=int(made), fg_pct=fg_pct,
-                t3a=len(threes), t3_pct=t3_pct,
-                t2a=len(twos),   t2_pct=t2_pct)
+ZONE_ORDER = ["Restricted Area", "In The Paint", "Mid-Range", "Corner 3", "Above Break 3"]
 
-# ── Court drawing ──────────────────────────────────────────────
+# ── Zone + stat helpers ────────────────────────────────────────
+def zone_of(x, y, dist, st):
+    if st == "3PT Field Goal":
+        return "Corner 3" if (y < 92.5 and abs(x) > 200) else "Above Break 3"
+    if dist <= 4:
+        return "Restricted Area"
+    if abs(x) <= 80 and y <= 142.5:
+        return "In The Paint"
+    return "Mid-Range"
+
+chart["ZONE"] = [zone_of(*r) for r in
+                 chart[["LOC_X", "LOC_Y", "SHOT_DISTANCE", "SHOT_TYPE"]].itertuples(index=False)]
+
+def player_stats(df):
+    total = len(df); made = int(df["SHOT_MADE_FLAG"].sum())
+    fg  = round(made/total*100, 1) if total else 0
+    thr = df[df["SHOT_TYPE"] == "3PT Field Goal"]; two = df[df["SHOT_TYPE"] == "2PT Field Goal"]
+    p3m = int(thr["SHOT_MADE_FLAG"].sum()); p2m = int(two["SHOT_MADE_FLAG"].sum())
+    t3  = round(p3m/len(thr)*100, 1) if len(thr) else 0
+    t2  = round(p2m/len(two)*100, 1) if len(two) else 0
+    efg = round((made + 0.5*p3m)/total*100, 1) if total else 0
+    return dict(total=total, made=made, fg=fg, t3a=len(thr), t3=t3,
+                t2a=len(two), t2=t2, efg=efg)
+
+def zone_stats(df):
+    """Return FG% per zone, label text, and per-bar color (opacity = volume share)."""
+    pct, txt, atts = [], [], []
+    for z in ZONE_ORDER:
+        zd = df[df["ZONE"] == z]; a = len(zd); m = int(zd["SHOT_MADE_FLAG"].sum())
+        p = round(m/a*100, 1) if a else 0
+        pct.append(p); atts.append(a)
+        txt.append(f"  {p:.0f}%  ·  {m}/{a}" if a else "  —")
+    mx = max(atts) or 1                       # opacity scales with shot volume
+    colors = [f"rgba(196,163,90,{0.42 + 0.58*(a/mx):.2f})" for a in atts]
+    return pct, txt, colors
+
+# ── Court geometry (drawn on the left subplot) ─────────────────
 def add_court(fig):
-    def line(x0, y0, x1, y1, w=1.5):
+    def line(x0, y0, x1, y1, w=1.4, c=LINE):
         fig.add_shape(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
-                      line=dict(color=COURT_LINE, width=w))
-    def rect(x0, y0, x1, y1):
+                      line=dict(color=c, width=w), row=1, col=1)
+    def rect(x0, y0, x1, y1, w=1.4):
         fig.add_shape(type="rect", x0=x0, y0=y0, x1=x1, y1=y1,
-                      line=dict(color=COURT_LINE, width=1.5), fillcolor="rgba(0,0,0,0)")
-    def circle(x0, y0, x1, y1, color=COURT_LINE):
+                      line=dict(color=LINE, width=w), fillcolor="rgba(0,0,0,0)", row=1, col=1)
+    def circle(x0, y0, x1, y1, c=LINE, w=1.4):
         fig.add_shape(type="circle", x0=x0, y0=y0, x1=x1, y1=y1,
-                      line=dict(color=color, width=1.5), fillcolor="rgba(0,0,0,0)")
+                      line=dict(color=c, width=w), fillcolor="rgba(0,0,0,0)", row=1, col=1)
 
-    # Outer boundary
-    rect(-250, -47.5, 250, 422.5)
-    # Paint boxes
-    rect(-80, -47.5, 80, 142.5)
-    rect(-60, -47.5, 60, 142.5)
-    # Free throw circle
-    circle(-60, 82.5, 60, 202.5)
-    # Restricted area
+    rect(-250, -47.5, 250, 422.5)          # boundary
+    rect(-80, -47.5, 80, 142.5)            # outer paint
+    rect(-60, -47.5, 60, 142.5)            # inner paint
+    circle(-60, 82.5, 60, 202.5)           # FT circle
     fig.add_shape(type="path", path="M -40 0 A 40 40 0 0 1 40 0",
-                  line=dict(color=COURT_LINE, width=1.5))
-    # Hoop
-    circle(-7.5, -7.5, 7.5, 7.5, color=HOOP_COL)
-    # Backboard
-    line(-30, -7.5, 30, -7.5, w=2.5)
-    # Corner 3s
-    line(-220, -47.5, -220, 92.5)
-    line( 220, -47.5,  220, 92.5)
-    # Three-point arc
-    theta = np.linspace(np.radians(22), np.radians(158), 120)
+                  line=dict(color=LINE, width=1.4), row=1, col=1)  # restricted
+    circle(-7.5, -7.5, 7.5, 7.5, c=GOLD, w=1.8)   # hoop
+    line(-30, -7.5, 30, -7.5, w=2.6, c=GOLD)      # backboard
+    line(-220, -47.5, -220, 92.5)                 # corner 3s
+    line(220, -47.5, 220, 92.5)
+    th = np.linspace(np.radians(22), np.radians(158), 120)   # arc
+    fig.add_trace(go.Scatter(x=237.5*np.cos(th), y=237.5*np.sin(th), mode="lines",
+                             line=dict(color=LINE, width=1.4), hoverinfo="none",
+                             showlegend=False), row=1, col=1)
+
+# ── Build subplots: court | zone panel ─────────────────────────
+fig = make_subplots(rows=1, cols=2, column_widths=[0.63, 0.37],
+                    horizontal_spacing=0.06,
+                    specs=[[{"type": "xy"}, {"type": "bar"}]])
+add_court(fig)   # trace index 0 = arc
+
+# Per-player shot scatter (col 1) + zone bar (col 2), all hidden but player 0
+for p in players:
+    pdf = chart[chart["PLAYER_NAME"] == p].copy()
+    pdf["hover"] = (pdf["ACTION_TYPE"] + "<br>" + pdf["SHOT_TYPE"] + " · "
+                    + pdf["SHOT_DISTANCE"].astype(str) + " ft<br>"
+                    + pdf["SHOT_MADE_FLAG"].map({1: "● Made", 0: "○ Missed"}))
     fig.add_trace(go.Scatter(
-        x=237.5 * np.cos(theta),
-        y=237.5 * np.sin(theta),
-        mode='lines',
-        line=dict(color=COURT_LINE, width=1.5),
-        hoverinfo='none', showlegend=False
-    ))
-    return fig
+        x=pdf["LOC_X"], y=pdf["LOC_Y"], mode="markers",
+        marker=dict(color=pdf["SHOT_MADE_FLAG"].map({1: MAKE, 0: MISS}),
+                    size=6.5, opacity=0.7, line=dict(width=0.4, color=BG)),
+        customdata=pdf["hover"], hovertemplate="%{customdata}<extra></extra>",
+        visible=False, showlegend=False), row=1, col=1)
 
-# ── Build figure ───────────────────────────────────────────────
-fig = go.Figure()
-fig = add_court(fig)
+for p in players:
+    pct, txt, colors = zone_stats(chart[chart["PLAYER_NAME"] == p])
+    fig.add_trace(go.Bar(
+        x=pct, y=ZONE_ORDER, orientation="h", text=txt, textposition="outside",
+        textfont=dict(color=TEXT, size=13, family=FONT), cliponaxis=False,
+        marker=dict(color=colors, line=dict(width=0)),
+        hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
+        visible=False, showlegend=False), row=1, col=2)
 
-# Dummy traces for make/miss legend
-fig.add_trace(go.Scatter(
-    x=[None], y=[None], mode='markers',
-    marker=dict(size=8, color=MAKE_COL, symbol='circle'),
-    name='Made', showlegend=True
-))
-fig.add_trace(go.Scatter(
-    x=[None], y=[None], mode='markers',
-    marker=dict(size=8, color=MISS_COL, symbol='circle'),
-    name='Missed', showlegend=True
-))
+N = len(players)
+fig.data[1].visible = True        # first player's court scatter
+fig.data[1 + N].visible = True    # first player's zone bars
 
-LEGEND_TRACES = 2  # arc + 2 legend dummies = indices 0,1,2; players start at 3
-
-# Player shot traces
-for player in player_names:
-    player_df = chart[chart['PLAYER_NAME'] == player].copy()
-    s = player_stats(chart, player)
-    player_df['hover'] = (
-        player_df['ACTION_TYPE'] + '<br>' +
-        player_df['SHOT_TYPE'] + '<br>' +
-        player_df['SHOT_DISTANCE'].astype(str) + ' ft<br>' +
-        player_df['SHOT_MADE_FLAG'].map({1: '✓ Made', 0: '✗ Missed'})
-    )
-    fig.add_trace(go.Scatter(
-        x=player_df['LOC_X'],
-        y=player_df['LOC_Y'],
-        mode='markers',
-        marker=dict(
-            color=player_df['SHOT_MADE_FLAG'].map({1: MAKE_COL, 0: MISS_COL}),
-            size=5,
-            opacity=0.65,
-            line=dict(width=0)
-        ),
-        name=player,
-        visible=False,
-        hovertemplate='%{customdata}<extra></extra>',
-        customdata=player_df['hover'],
-        showlegend=False
-    ))
-
-# Make first player visible
-fig.data[3].visible = True
-
-# ── Buttons ────────────────────────────────────────────────────
-N = len(player_names)
-TOTAL_TRACES = 1 + LEGEND_TRACES + N  # arc + 2 legend + 7 players
-
-fixed_layout = {
-    'xaxis.range':     [-265, 265],
-    'yaxis.range':     [-55,  400],
-    'xaxis.autorange': False,
-    'yaxis.autorange': False,
-}
-
+# ── Title / stat line (updates per player) ─────────────────────
 HEADER = (
-    "<span style='font-size:22px;color:#ffffff;font-weight:bold;letter-spacing:2px'>"
-    "SAN ANTONIO SPURS</span><br>"
-    "<span style='font-size:12px;color:#888888;letter-spacing:3px'>"
-    "2025–26 SHOT CHART</span><br>"
-)
+    "<span style='font-size:26px;color:#fff;font-weight:bold;letter-spacing:6px'>"
+    "SAN ANTONIO SPURS</span>"
+    "<span style='font-size:26px;color:" + GOLD + ";letter-spacing:6px'> ★</span><br>"
+    "<span style='font-size:12px;color:" + MUTE + ";letter-spacing:5px'>"
+    "2025–26 SEASON  ·  SHOT CHART</span>")
 
-def make_title(player, s):
-    return (
-        HEADER +
-        f"<span style='font-size:16px;color:{TEXT_COL};font-weight:bold'>{player}</span><br>"
-        f"<span style='color:{ACC_COL};font-size:12px'>"
-        f"FG {s['fg_pct']}%  ({s['made']}/{s['total']} FGA) &nbsp;|&nbsp; "
-        f"2PT {s['t2_pct']}% ({s['t2a']} att) &nbsp;|&nbsp; "
-        f"3PT {s['t3_pct']}% ({s['t3a']} att)</span>"
-    )
+def title_for(p):
+    s = player_stats(chart[chart["PLAYER_NAME"] == p])
+    return (HEADER + "<br>"
+            f"<span style='font-size:18px;color:{TEXT};font-weight:bold;letter-spacing:2px'>"
+            f"{p.upper()}</span>"
+            f"<span style='font-size:13px;color:{MUTE}'>"
+            f"     FG <b style='color:{TEXT}'>{s['fg']}%</b> ({s['made']}/{s['total']})"
+            f"     ·   2PT <b style='color:{TEXT}'>{s['t2']}%</b>"
+            f"     ·   3PT <b style='color:{TEXT}'>{s['t3']}%</b> ({s['t3a']})"
+            f"     ·   eFG <b style='color:{GOLD}'>{s['efg']}%</b></span>")
 
+# ── Player selector (horizontal pill row) ──────────────────────
+SHORT = {p: p.split()[-1].upper() for p in players}   # last-name pills
 buttons = []
-for i, player in enumerate(player_names):
-    s = player_stats(chart, player)
-    visible = [True, True, True] + [j == i for j in range(N)]
-    layout_update = {**fixed_layout, 'title.text': make_title(player, s)}
-    buttons.append(dict(
-        label=player,
-        method='update',
-        args=[{'visible': visible}, layout_update]
-    ))
+for i, p in enumerate(players):
+    vis = [True] + [k == i for k in range(N)] + [k == i for k in range(N)]
+    buttons.append(dict(label=SHORT[p], method="update",
+                        args=[{"visible": vis}, {"title.text": title_for(p)}]))
 
-s0 = player_stats(chart, player_names[0])
-init_title = make_title(player_names[0], s0)
-
+# ── Layout ─────────────────────────────────────────────────────
 fig.update_layout(
+    title=dict(text=title_for(players[0]), x=0.5, xanchor="center",
+               y=0.955, yanchor="top", font=dict(color=TEXT, family=FONT)),
     updatemenus=[dict(
-        buttons=buttons,
-        direction="down",
-        x=0.01, xanchor="left",
-        y=1.13, yanchor="top",
-        bgcolor="#2a2a2a",
-        bordercolor=ACC_COL,
-        borderwidth=1,
-        font=dict(color=TEXT_COL, size=13),
-        showactive=True,
-        active=0,
-    )],
-    title=dict(
-        text=init_title,
-        x=0.5, xanchor='center',
-        y=0.97, yanchor='top',
-        font=dict(color=TEXT_COL)
-    ),
-    xaxis=dict(range=[-265, 265], showgrid=False, zeroline=False,
-               visible=False, autorange=False),
-    yaxis=dict(range=[-55, 400],  showgrid=False, zeroline=False,
-               visible=False, autorange=False),
-    plot_bgcolor=COURT_BG,
-    paper_bgcolor=BG,
-    margin=dict(l=20, r=20, t=175, b=20),
-    width = 1400,
-    height = 700,
-    legend=dict(
-        x=0.88, y=0.12,
-        bgcolor="rgba(30,30,30,0.8)",
-        bordercolor=ACC_COL,
-        borderwidth=1,
-        font=dict(color=TEXT_COL, size=12)
-    ),
-    font=dict(family="'Helvetica Neue', Arial, sans-serif", color=TEXT_COL)
+        type="buttons", direction="right", buttons=buttons,
+        x=0.005, xanchor="left", y=1.16, yanchor="top", pad=dict(l=2, r=2, t=2, b=2),
+        bgcolor=PANEL, bordercolor=GOLD, borderwidth=1,
+        font=dict(color=TEXT, size=12, family=FONT), showactive=True, active=0)],
+    # court axes
+    xaxis=dict(range=[-260, 260], visible=False, fixedrange=True),
+    yaxis=dict(range=[-55, 430], visible=False, fixedrange=True,
+               scaleanchor="x", scaleratio=1),   # lock court aspect
+    # zone-panel axes
+    xaxis2=dict(range=[0, 100], showgrid=True, gridcolor="#232327", gridwidth=1,
+                zeroline=False, tickfont=dict(color=MUTE, size=11, family=FONT),
+                ticksuffix="%", title=dict(text="FG% BY ZONE",
+                font=dict(color=MUTE, size=12, family=FONT)), side="top"),
+    yaxis2=dict(showgrid=False, zeroline=False, autorange="reversed",
+                tickfont=dict(color=TEXT, size=13, family=FONT)),
+    plot_bgcolor=COURT_BG, paper_bgcolor=BG,
+    font=dict(family=FONT, color=TEXT),
+    margin=dict(l=30, r=40, t=190, b=40),
+    width=1180, height=760, bargap=0.45,
+    annotations=[
+        dict(   # compact make/miss key inside court
+            x=0.005, y=0.02, xref="paper", yref="paper", xanchor="left", showarrow=False,
+            align="left", font=dict(size=13, family=FONT),
+            text=(f"<span style='color:{MAKE}'>●</span> "
+                  f"<span style='color:{MUTE}'>MADE</span>&nbsp;&nbsp;&nbsp;"
+                  f"<span style='color:{MISS}'>●</span> "
+                  f"<span style='color:{MUTE}'>MISSED</span>")),
+        dict(   # explain bar shading = volume
+            x=1.0, y=-0.03, xref="paper", yref="paper", xanchor="right", showarrow=False,
+            font=dict(size=11, family=FONT, color=MUTE),
+            text="BAR SHADE = SHOT VOLUME")],
 )
 
-fig.show()
+if __name__ == "__main__":
+    fig.write_html("spurs_shot_chart.html", include_plotlyjs="cdn",
+                   full_html=True, config={"displayModeBar": False})
+    print("wrote spurs_shot_chart.html")
+    # fig.show()  # uncomment for interactive local view
